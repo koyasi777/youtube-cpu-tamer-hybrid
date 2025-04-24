@@ -10,7 +10,7 @@
 // @name:de      YouTube CPU-Last-Reduzierer – Hybrid-Edition (Verbessert)
 // @name:pt-BR   Redutor de uso da CPU no YouTube – Edição Híbrida (Aprimorada)
 // @name:ru      Снижение нагрузки на CPU в YouTube – Гибридная версия (Улучшенная)
-// @version      3.80
+// @version      3.90
 // @description         Reduce CPU load on YouTube using hybrid DOMMutation + AnimationFrame strategy with dynamic switching and delay correction
 // @description:ja      DOM変化とrequestAnimationFrameを組み合わせたハイブリッド戦略でYouTubeのCPU負荷を大幅軽減！遅延補正＆動的切替も搭載。
 // @description:en      Reduce CPU load on YouTube using hybrid DOMMutation + AnimationFrame strategy with dynamic switching and delay correction
