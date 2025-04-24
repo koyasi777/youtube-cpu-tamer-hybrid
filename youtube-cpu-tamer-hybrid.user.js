@@ -35,9 +35,12 @@
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=youtube.com
 // @homepageURL  https://github.com/koyasi777/youtube-cpu-tamer-hybrid
 // @supportURL   https://github.com/koyasi777/youtube-cpu-tamer-hybrid/issues
+// @downloadURL https://update.greasyfork.org/scripts/533807/YouTube%20CPU%20Tamer%20%E2%80%93%20Hybrid%20Edition%20%28Improved%29.user.js
+// @updateURL https://update.greasyfork.org/scripts/533807/YouTube%20CPU%20Tamer%20%E2%80%93%20Hybrid%20Edition%20%28Improved%29.meta.js
 // ==/UserScript==
 
-(async () => {
+
+(() => {
   'use strict';
 
   const key = '__yt_cpu_tamer_hybrid_running__';
@@ -46,7 +49,7 @@
 
   const waitForDocumentReady = async () => {
     while (!document.documentElement || !document.head) {
-      await new Promise(r => requestAnimationFrame(r));
+      await new Promise(r => window.requestAnimationFrame(r));
     }
   };
 
@@ -64,8 +67,9 @@
     };
   })();
 
-  const cleanContext = async () => {
+  const setup = async () => {
     await waitForDocumentReady();
+
     const frameId = 'yt-cpu-tamer-frame';
     let iframe = document.getElementById(frameId);
     if (!iframe) {
@@ -75,106 +79,107 @@
       iframe.sandbox = 'allow-same-origin';
       document.documentElement.appendChild(iframe);
     }
-    while (!iframe.contentWindow) await new Promise(r => requestAnimationFrame(r));
-    const { requestAnimationFrame, setTimeout, setInterval, clearTimeout, clearTimeout: ci } = iframe.contentWindow;
-    return { requestAnimationFrame, setTimeout, setInterval, clearTimeout, clearInterval: ci };
-  };
+    while (!iframe.contentWindow) await new Promise(r => window.requestAnimationFrame(r));
 
-  const ctx = await cleanContext();
-  const { requestAnimationFrame, setTimeout, setInterval, clearTimeout, clearInterval } = ctx;
+    const {
+      requestAnimationFrame: iframeRAF,
+      setTimeout: iframeSetTimeout,
+      setInterval: iframeSetInterval,
+      clearTimeout: iframeClearTimeout,
+      clearInterval: iframeClearInterval
+    } = iframe.contentWindow;
 
-  const dummyDiv = document.createElement('div');
-  dummyDiv.style.display = 'none';
-  document.documentElement.appendChild(dummyDiv);
+    const dummyDiv = document.createElement('div');
+    dummyDiv.style.display = 'none';
+    document.documentElement.appendChild(dummyDiv);
 
-  let currentTrigger;
+    let currentTrigger = () => new Promise(r => iframeRAF(r));
 
-  const createHybridTriggerBase = () => {
-    if (document.visibilityState === 'visible') {
-      return (callback) => {
-        const p = new PromiseExt();
-        requestAnimationFrame(() => p.resolve());
-        return p.then(callback);
-      };
-    } else {
-      return (callback) => {
-        const attr = 'data-yt-cpu-tamer';
-        dummyDiv.setAttribute(attr, Math.random().toString(36));
-        const p = new PromiseExt();
-        const obs = new MutationObserver(() => {
-          obs.disconnect();
-          p.resolve();
-        });
-        obs.observe(dummyDiv, { attributes: true });
-        return p.then(callback);
-      };
-    }
-  };
-
-  currentTrigger = createHybridTriggerBase();
-  document.addEventListener('visibilitychange', () => {
-    currentTrigger = createHybridTriggerBase();
-  });
-
-  const overrideTimer = (timerFn, clearFn, label, registry) => {
-    return (fn, delay = 0, ...args) => {
-      if (typeof fn !== 'function') return timerFn(fn, delay, ...args);
-      const id = Symbol(label);
-      let isActive = true;
-      const handler = () => {
-        const start = performance.now();
-        currentTrigger(() => {
-          const elapsed = performance.now() - start;
-          if (!isActive) return;
-          if (elapsed >= delay) {
-            fn(...args);
-          } else {
-            setTimeout(() => {
-              if (isActive) fn(...args);
-            }, delay - elapsed);
-          }
-        });
-      };
-      const nativeId = timerFn(handler, delay);
-      registry.set(id, () => {
-        isActive = false;
-        clearFn(nativeId);
-      });
-      return id;
-    };
-  };
-
-  const overrideClear = (registry, nativeFn) => {
-    return (id) => {
-      const stop = registry.get(id);
-      if (stop) {
-        stop();
-        registry.delete(id);
+    const createHybridTriggerBase = () => {
+      if (document.visibilityState === 'visible') {
+        return (callback) => {
+          const p = new PromiseExt();
+          window.requestAnimationFrame(() => p.resolve());
+          return p.then(callback);
+        };
       } else {
-        nativeFn(id);
+        return (callback) => {
+          const attr = 'data-yt-cpu-tamer';
+          dummyDiv.setAttribute(attr, Math.random().toString(36));
+          const p = new PromiseExt();
+          const obs = new MutationObserver(() => {
+            obs.disconnect();
+            p.resolve();
+          });
+          obs.observe(dummyDiv, { attributes: true });
+          return p.then(callback);
+        };
       }
     };
+
+    currentTrigger = createHybridTriggerBase();
+    document.addEventListener('visibilitychange', () => {
+      currentTrigger = createHybridTriggerBase();
+    });
+
+    const activeTimeouts = new Set();
+    const activeIntervals = new Set();
+
+    const overrideTimer = (timerFn, clearFn, activeSet) => {
+      return (fn, delay = 0, ...args) => {
+        if (typeof fn !== 'function') return timerFn(fn, delay, ...args);
+        let isActive = true;
+        const handler = () => {
+          const start = performance.now();
+          currentTrigger(() => {
+            const elapsed = performance.now() - start;
+            if (!isActive) return;
+            if (elapsed >= delay) {
+              fn(...args);
+            } else {
+              timerFn(() => {
+                if (isActive) fn(...args);
+              }, delay - elapsed);
+            }
+          });
+        };
+        const nativeId = timerFn(handler, delay);
+        activeSet.add(nativeId);
+        return nativeId;
+      };
+    };
+
+    const overrideClear = (clearFn, activeSet) => {
+      return (id) => {
+        if (activeSet.has(id)) {
+          activeSet.delete(id);
+        }
+        clearFn(id);
+      };
+    };
+
+    // タイマーオーバーライドは DOMContentLoaded 後に実施
+    window.addEventListener('DOMContentLoaded', () => {
+      window.setTimeout = overrideTimer(iframeSetTimeout, iframeClearTimeout, activeTimeouts);
+      window.setInterval = overrideTimer(iframeSetInterval, iframeClearInterval, activeIntervals);
+
+      window.clearTimeout = overrideClear(iframeClearTimeout, activeTimeouts);
+      window.clearInterval = overrideClear(iframeClearInterval, activeIntervals);
+
+      const patchToString = (target, source) => {
+        try {
+          target.toString = source.toString.bind(source);
+        } catch {}
+      };
+
+      patchToString(window.setTimeout, iframeSetTimeout);
+      patchToString(window.setInterval, iframeSetInterval);
+      patchToString(window.clearTimeout, iframeClearTimeout);
+      patchToString(window.clearInterval, iframeClearInterval);
+
+      console.log('[YouTube CPU Tamer – Hybrid Edition (Safe Fixed)] Active');
+    });
   };
 
-  const activeTimeouts = new Map();
-  const activeIntervals = new Map();
-
-  window.setTimeout = overrideTimer(setTimeout, clearTimeout, 'timeout', activeTimeouts);
-  window.setInterval = overrideTimer(setInterval, clearInterval, 'interval', activeIntervals);
-
-  window.clearTimeout = overrideClear(activeTimeouts, clearTimeout);
-  window.clearInterval = overrideClear(activeIntervals, clearInterval);
-
-  const patchToString = (target, source) => {
-    try {
-      target.toString = source.toString.bind(source);
-    } catch {}
-  };
-
-  patchToString(window.setTimeout, setTimeout);
-  patchToString(window.setInterval, setInterval);
-  patchToString(window.clearTimeout, clearTimeout);
-  patchToString(window.clearInterval, clearInterval);
-
-  console.log('[YouTube CPU Tamer – Hybrid Edition] Fully loaded and optimized.');
+  setup();
 })();
