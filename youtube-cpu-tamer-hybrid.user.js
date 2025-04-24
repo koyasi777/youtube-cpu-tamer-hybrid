@@ -32,6 +32,7 @@
 // @grant        none
 // @inject-into  page
 // @license      MIT
+// @icon         https://www.google.com/s2/favicons?sz=64&domain=youtube.com
 // @homepageURL  https://github.com/koyasi777/youtube-cpu-tamer-hybrid
 // @supportURL   https://github.com/koyasi777/youtube-cpu-tamer-hybrid/issues
 // ==/UserScript==
