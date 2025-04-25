@@ -39,7 +39,6 @@
 // @updateURL https://update.greasyfork.org/scripts/533807/YouTube%20CPU%20Tamer%20%E2%80%93%20Hybrid%20Edition%20%28Improved%29.meta.js
 // ==/UserScript==
 
-
 (() => {
   'use strict';
 
@@ -49,7 +48,7 @@
 
   const waitForDocumentReady = async () => {
     while (!document.documentElement || !document.head) {
-      await new Promise(r => window.requestAnimationFrame(r));
+      await new Promise(r => requestAnimationFrame(r));
     }
   };
 
@@ -79,7 +78,7 @@
       iframe.sandbox = 'allow-same-origin';
       document.documentElement.appendChild(iframe);
     }
-    while (!iframe.contentWindow) await new Promise(r => window.requestAnimationFrame(r));
+    while (!iframe.contentWindow) await new Promise(r => requestAnimationFrame(r));
 
     const {
       requestAnimationFrame: iframeRAF,
@@ -99,7 +98,7 @@
       if (document.visibilityState === 'visible') {
         return (callback) => {
           const p = new PromiseExt();
-          window.requestAnimationFrame(() => p.resolve());
+          requestAnimationFrame(() => p.resolve());
           return p.then(callback);
         };
       } else {
@@ -130,17 +129,8 @@
         if (typeof fn !== 'function') return timerFn(fn, delay, ...args);
         let isActive = true;
         const handler = () => {
-          const start = performance.now();
           currentTrigger(() => {
-            const elapsed = performance.now() - start;
-            if (!isActive) return;
-            if (elapsed >= delay) {
-              fn(...args);
-            } else {
-              timerFn(() => {
-                if (isActive) fn(...args);
-              }, delay - elapsed);
-            }
+            if (isActive) fn(...args);
           });
         };
         const nativeId = timerFn(handler, delay);
@@ -151,18 +141,14 @@
 
     const overrideClear = (clearFn, activeSet) => {
       return (id) => {
-        if (activeSet.has(id)) {
-          activeSet.delete(id);
-        }
+        if (activeSet.has(id)) activeSet.delete(id);
         clearFn(id);
       };
     };
 
-    // タイマーオーバーライドは DOMContentLoaded 後に実施
     window.addEventListener('DOMContentLoaded', () => {
       window.setTimeout = overrideTimer(iframeSetTimeout, iframeClearTimeout, activeTimeouts);
       window.setInterval = overrideTimer(iframeSetInterval, iframeClearInterval, activeIntervals);
-
       window.clearTimeout = overrideClear(iframeClearTimeout, activeTimeouts);
       window.clearInterval = overrideClear(iframeClearInterval, activeIntervals);
 
@@ -177,7 +163,7 @@
       patchToString(window.clearTimeout, iframeClearTimeout);
       patchToString(window.clearInterval, iframeClearInterval);
 
-      console.log('[YouTube CPU Tamer – Hybrid Edition (Safe Fixed)] Active');
+      console.log('[YouTube CPU Tamer – Hybrid Edition (Patched)] Active');
     });
   };
 
