@@ -10,7 +10,7 @@
 // @name:de      YouTube CPU-Last-Reduzierer – Hybrid-Edition (Verbessert)
 // @name:pt-BR   Redutor de uso da CPU no YouTube – Edição Híbrida (Aprimorada)
 // @name:ru      Снижение нагрузки на CPU в YouTube – Гибридная версия (Улучшенная)
-// @version      3.95
+// @version      4.00
 // @description         Reduce CPU load on YouTube using hybrid DOMMutation + AnimationFrame strategy with dynamic switching and delay correction
 // @description:ja      DOM変化とrequestAnimationFrameを組み合わせたハイブリッド戦略でYouTubeのCPU負荷を大幅軽減！遅延補正＆動的切替も搭載。
 // @description:en      Reduce CPU load on YouTube using hybrid DOMMutation + AnimationFrame strategy with dynamic switching and delay correction
@@ -146,7 +146,11 @@
       };
     };
 
-    window.addEventListener('DOMContentLoaded', () => {
+    // ✅ 初期化ログ（確実に出る）
+    console.log('[YouTube CPU Tamer – Hybrid Edition] Initializing');
+
+    // ✅ タイマー/clear系のパッチ適用
+    const runMainPatch = () => {
       window.setTimeout = overrideTimer(iframeSetTimeout, iframeClearTimeout, activeTimeouts);
       window.setInterval = overrideTimer(iframeSetInterval, iframeClearInterval, activeIntervals);
       window.clearTimeout = overrideClear(iframeClearTimeout, activeTimeouts);
@@ -164,7 +168,31 @@
       patchToString(window.clearInterval, iframeClearInterval);
 
       console.log('[YouTube CPU Tamer – Hybrid Edition (Patched)] Active');
+    };
+
+    // ✅ DOMContentLoaded or 即時実行
+    if (document.readyState === 'loading') {
+      window.addEventListener('DOMContentLoaded', runMainPatch);
+    } else {
+      runMainPatch();
+    }
+
+    // ✅ SPA遷移監視ログ（DOM完全構築を待つ版）
+    const waitForTargetNode = async () => {
+      while (!document.querySelector('ytd-app') && !document.body) {
+        await new Promise(r => requestAnimationFrame(r));
+      }
+      return document.querySelector('ytd-app') || document.body;
+    };
+
+    const targetNode = await waitForTargetNode();
+
+    // ✅ YouTube独自のナビゲーションイベントにも対応
+    window.addEventListener('yt-navigate-finish', () => {
+      console.log('[YouTube CPU Tamer] yt-navigate-finish – reapplying patch');
+      runMainPatch();
     });
+
   };
 
   setup();
