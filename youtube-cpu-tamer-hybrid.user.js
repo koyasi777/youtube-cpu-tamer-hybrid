@@ -10,7 +10,7 @@
 // @name:de      YouTube CPU-Last-Reduzierer – Hybrid-Edition (Verbessert)
 // @name:pt-BR   Redutor de uso da CPU no YouTube – Edição Híbrida (Aprimorada)
 // @name:ru      Снижение нагрузки на CPU в YouTube – Гибридная версия (Улучшенная)
-// @version      4.00
+// @version      4.01
 // @description         Reduce CPU load on YouTube using hybrid DOMMutation + AnimationFrame strategy with dynamic switching and delay correction
 // @description:ja      DOM変化とrequestAnimationFrameを組み合わせたハイブリッド戦略でYouTubeのCPU負荷を大幅軽減！遅延補正＆動的切替も搭載。
 // @description:en      Reduce CPU load on YouTube using hybrid DOMMutation + AnimationFrame strategy with dynamic switching and delay correction
@@ -40,160 +40,179 @@
 // ==/UserScript==
 
 (() => {
-  'use strict';
+  "use strict";
 
-  const key = '__yt_cpu_tamer_hybrid_running__';
-  if (window[key]) return;
-  window[key] = true;
+  /**
+   * Guard – avoid double‑instantiation on SPA navigation
+   */
+  const FLAG = "__yt_cpu_tamer_hybrid_running__";
+  if (window[FLAG]) return;
+  window[FLAG] = true;
 
-  const waitForDocumentReady = async () => {
+  /*************************************************************************
+   * Helpers
+   *************************************************************************/
+  const nextAnimationFrame = () => new Promise(r => requestAnimationFrame(r));
+
+  const waitForDocReady = async () => {
     while (!document.documentElement || !document.head) {
-      await new Promise(r => requestAnimationFrame(r));
+      await nextAnimationFrame();
     }
   };
 
+  /**
+   * A thin extended‑Promise that exposes resolve()/reject() – convenient for
+   * bridging observer + rAF based triggers without extra closures.
+   */
   const PromiseExt = (() => {
-    let _resolve, _reject;
-    const h = (res, rej) => { _resolve = res; _reject = rej; };
+    let _res, _rej;
+    const shim = (r, j) => {
+      _res = r;
+      _rej = j;
+    };
     return class extends Promise {
-      constructor(cb = h) {
+      constructor(cb = shim) {
         super(cb);
-        if (cb === h) {
-          this.resolve = _resolve;
-          this.reject = _reject;
+        if (cb === shim) {
+          /** @type {(value?: unknown) => void} */
+          // @ts-ignore – dynamically injected
+          this.resolve = _res;
+          /** @type {(reason?: any) => void} */
+          // @ts-ignore
+          this.reject = _rej;
         }
       }
     };
   })();
 
+  /*************************************************************************
+   * Main
+   *************************************************************************/
   const setup = async () => {
-    await waitForDocumentReady();
+    await waitForDocReady();
 
-    const frameId = 'yt-cpu-tamer-frame';
-    let iframe = document.getElementById(frameId);
-    if (!iframe) {
-      iframe = document.createElement('iframe');
-      iframe.style.display = 'none';
-      iframe.id = frameId;
-      iframe.sandbox = 'allow-same-origin';
-      document.documentElement.appendChild(iframe);
+    /***** 1. Create helper iframe that owns lightweight timers *****/
+    const FRAME_ID = "yt-cpu-tamer-timer-frame";
+    let frame = document.getElementById(FRAME_ID);
+    if (!frame) {
+      frame = document.createElement("iframe");
+      frame.id = FRAME_ID;
+      frame.style.display = "none";
+      // Allow both same‑origin and script execution so that callbacks routed
+      // through the iframe don’t hit the Chrome sandbox error.
+      frame.sandbox = "allow-same-origin allow-scripts";
+      // Use srcdoc to keep the iframe same‑origin (& blank) in all browsers.
+      frame.srcdoc = "<!doctype html><title>yt-cpu-tamer</title>";
+      document.documentElement.appendChild(frame);
     }
-    while (!iframe.contentWindow) await new Promise(r => requestAnimationFrame(r));
+    // Wait until the inner window is ready.
+    while (!frame.contentWindow) {
+      await nextAnimationFrame();
+    }
 
     const {
-      requestAnimationFrame: iframeRAF,
-      setTimeout: iframeSetTimeout,
-      setInterval: iframeSetInterval,
-      clearTimeout: iframeClearTimeout,
-      clearInterval: iframeClearInterval
-    } = iframe.contentWindow;
+      requestAnimationFrame: frameRAF,
+      setTimeout: frameSetTimeout,
+      setInterval: frameSetInterval,
+      clearTimeout: frameClearTimeout,
+      clearInterval: frameClearInterval
+    } = /** @type {Window & typeof globalThis} */ (frame.contentWindow);
 
-    const dummyDiv = document.createElement('div');
-    dummyDiv.style.display = 'none';
-    document.documentElement.appendChild(dummyDiv);
+    /***** 2. Trigger generator – rAF when visible, MutationObserver otherwise *****/
+    const dummy = document.createElement("div");
+    dummy.style.display = "none";
+    document.documentElement.appendChild(dummy);
 
-    let currentTrigger = () => new Promise(r => iframeRAF(r));
-
-    const createHybridTriggerBase = () => {
-      if (document.visibilityState === 'visible') {
-        return (callback) => {
+    /** @returns {(cb: () => void) => Promise<void>} */
+    const makeHybridTrigger = () => {
+      if (document.visibilityState === "visible") {
+        return cb => {
           const p = new PromiseExt();
-          requestAnimationFrame(() => p.resolve());
-          return p.then(callback);
+          requestAnimationFrame(p.resolve);
+          return p.then(cb);
         };
       } else {
-        return (callback) => {
-          const attr = 'data-yt-cpu-tamer';
-          dummyDiv.setAttribute(attr, Math.random().toString(36));
+        return cb => {
           const p = new PromiseExt();
-          const obs = new MutationObserver(() => {
-            obs.disconnect();
+          const MO = new MutationObserver(() => {
+            MO.disconnect();
             p.resolve();
           });
-          obs.observe(dummyDiv, { attributes: true });
-          return p.then(callback);
+          MO.observe(dummy, { attributes: true });
+          dummy.setAttribute("data-yt-cpu-tamer", Math.random().toString(36));
+          return p.then(cb);
         };
       }
     };
 
-    currentTrigger = createHybridTriggerBase();
-    document.addEventListener('visibilitychange', () => {
-      currentTrigger = createHybridTriggerBase();
+    /** @type {(cb: () => void) => Promise<void>} */
+    let currentTrigger = makeHybridTrigger();
+    document.addEventListener("visibilitychange", () => {
+      currentTrigger = makeHybridTrigger();
     });
 
+    /***** 3. Timer patching *****/
     const activeTimeouts = new Set();
     const activeIntervals = new Set();
 
-    const overrideTimer = (timerFn, clearFn, activeSet) => {
-      return (fn, delay = 0, ...args) => {
-        if (typeof fn !== 'function') return timerFn(fn, delay, ...args);
-        let isActive = true;
-        const handler = () => {
-          currentTrigger(() => {
-            if (isActive) fn(...args);
-          });
-        };
-        const nativeId = timerFn(handler, delay);
-        activeSet.add(nativeId);
-        return nativeId;
+    /**
+     * Wrap native timer so that:
+     *   – scheduling is done with *iframe* timers (very cheap)
+     *   – execution is throttled by currentTrigger
+     *   – callback runs in the *main* window realm (fn.apply(window,…))
+     */
+    const makeTimer = (nativeTimer, pool) => {
+      return function patchedTimer(fn, delay = 0, ...args) {
+        if (typeof fn !== "function") return nativeTimer(fn, delay, ...args);
+        const id = nativeTimer(() => {
+          currentTrigger(() => fn.apply(window, args));
+        }, delay);
+        pool.add(id);
+        return id;
       };
     };
 
-    const overrideClear = (clearFn, activeSet) => {
-      return (id) => {
-        if (activeSet.has(id)) activeSet.delete(id);
-        clearFn(id);
-      };
+    const makeClear = (nativeClear, pool) => id => {
+      if (pool.has(id)) pool.delete(id);
+      nativeClear(id);
     };
 
-    // ✅ 初期化ログ（確実に出る）
-    console.log('[YouTube CPU Tamer – Hybrid Edition] Initializing');
+    /**
+     * Apply / re‑apply the patches (re‑applied on yt‑navigate‑finish).
+     */
+    const patchTimers = () => {
+      window.setTimeout = makeTimer(frameSetTimeout, activeTimeouts);
+      window.setInterval = makeTimer(frameSetInterval, activeIntervals);
+      window.clearTimeout = makeClear(frameClearTimeout, activeTimeouts);
+      window.clearInterval = makeClear(frameClearInterval, activeIntervals);
 
-    // ✅ タイマー/clear系のパッチ適用
-    const runMainPatch = () => {
-      window.setTimeout = overrideTimer(iframeSetTimeout, iframeClearTimeout, activeTimeouts);
-      window.setInterval = overrideTimer(iframeSetInterval, iframeClearInterval, activeIntervals);
-      window.clearTimeout = overrideClear(iframeClearTimeout, activeTimeouts);
-      window.clearInterval = overrideClear(iframeClearInterval, activeIntervals);
-
-      const patchToString = (target, source) => {
+      // Align Function.prototype.toString() so that devtools show native code
+      const mirrorToString = (patched, native) => {
         try {
-          target.toString = source.toString.bind(source);
-        } catch {}
+          patched.toString = native.toString.bind(native);
+        } catch {/* ignore */}
       };
+      mirrorToString(window.setTimeout, frameSetTimeout);
+      mirrorToString(window.setInterval, frameSetInterval);
+      mirrorToString(window.clearTimeout, frameClearTimeout);
+      mirrorToString(window.clearInterval, frameClearInterval);
 
-      patchToString(window.setTimeout, iframeSetTimeout);
-      patchToString(window.setInterval, iframeSetInterval);
-      patchToString(window.clearTimeout, iframeClearTimeout);
-      patchToString(window.clearInterval, iframeClearInterval);
-
-      console.log('[YouTube CPU Tamer – Hybrid Edition (Patched)] Active');
+      console.log("[YouTube CPU Tamer – Hybrid Edition] Timers patched");
     };
 
-    // ✅ DOMContentLoaded or 即時実行
-    if (document.readyState === 'loading') {
-      window.addEventListener('DOMContentLoaded', runMainPatch);
+    // Initial patch (DOMContentLoaded OR immediate if already interactive).
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", patchTimers, { once: true });
     } else {
-      runMainPatch();
+      patchTimers();
     }
 
-    // ✅ SPA遷移監視ログ（DOM完全構築を待つ版）
-    const waitForTargetNode = async () => {
-      while (!document.querySelector('ytd-app') && !document.body) {
-        await new Promise(r => requestAnimationFrame(r));
-      }
-      return document.querySelector('ytd-app') || document.body;
-    };
-
-    const targetNode = await waitForTargetNode();
-
-    // ✅ YouTube独自のナビゲーションイベントにも対応
-    window.addEventListener('yt-navigate-finish', () => {
-      console.log('[YouTube CPU Tamer] yt-navigate-finish – reapplying patch');
-      runMainPatch();
+    /***** 4. Re‑patch on SPA navigations *****/
+    window.addEventListener("yt-navigate-finish", () => {
+      console.log("[YouTube CPU Tamer] yt-navigate-finish – re‑applying patch");
+      patchTimers();
     });
-
   };
 
-  setup();
+  setup().catch(err => console.error("[YouTube CPU Tamer] setup failed", err));
 })();
