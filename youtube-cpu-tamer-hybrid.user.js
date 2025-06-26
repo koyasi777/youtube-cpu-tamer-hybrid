@@ -10,7 +10,7 @@
 // @name:de           YouTube CPU-Last-Reduzierer – Hybrid-Edition
 // @name:pt-BR        Redutor de uso da CPU no YouTube – Edição Híbrida
 // @name:ru           Снижение нагрузки на CPU в YouTube – Гибридная версия
-// @version           4.70
+// @version           4.80
 // @description       Dramatically reduces CPU usage on YouTube by intelligently throttling timers, while protecting critical player functions to prevent freezing.
 // @description:ja    YouTubeのCPU負荷を劇的に削減します。動画プレイヤーの重要機能を保護し、無限ロードなどのフリーズ現象を防止する安定性重視の設計です。
 // @description:en    Dramatically reduces CPU usage on YouTube by intelligently throttling timers, while protecting critical player functions to prevent freezing.
@@ -44,7 +44,8 @@
 
   // --- 設定値 ---
   const MIN_DELAY_THRESHOLD = 250;
-  const REPATCH_DELAY_AFTER_NAVIGATE = 1000; // SPAナビゲーション後に再パッチするまでの待機時間(ms)
+  const PLAYER_READY_SELECTOR = "#movie_player .ytp-chrome-bottom"; // プレイヤー準備完了を判断するためのDOMセレクタ
+  const REPATCH_TIMEOUT = 10000; // プレイヤーを検出できなかった場合に再パッチするまでの最大待機時間(ms)
 
   // --- スクリプトの初期化と多重実行防止 ---
   const FLAG = "__yt_cpu_tamer_hybrid_running__";
@@ -147,11 +148,7 @@
 
     const makeTimeoutPatcher = (nativeTimeout, pool) => {
       return function patchedSetTimeout(callback, delay = 0, ...args) {
-        if (
-          typeof callback !== "function" ||
-          !timersAreThrottled ||
-          delay < MIN_DELAY_THRESHOLD
-        ) {
+        if (typeof callback !== "function" || !timersAreThrottled || delay < MIN_DELAY_THRESHOLD) {
           return nativeTimeout(callback, delay, ...args);
         }
         const id = nativeTimeout(() => {
@@ -173,7 +170,7 @@
       } catch (e) { /* ignore */ }
     };
 
-    const patchTimers = () => {
+    const installPatches = () => {
       window.setTimeout = makeTimeoutPatcher(nativeTimers.setTimeout, activeTimeouts);
       window.clearTimeout = makeClear(nativeTimers.clearTimeout, activeTimeouts);
       window.setInterval = nativeTimers.setInterval;
@@ -182,44 +179,84 @@
       mirrorToString(window.setInterval, nativeTimers.setInterval);
       mirrorToString(window.clearTimeout, nativeTimers.clearTimeout);
       mirrorToString(window.clearInterval, nativeTimers.clearInterval);
-      console.log("[YouTube CPU Tamer] Timers patched successfully.");
+      console.log("[YouTube CPU Tamer] Patches installed.");
     };
 
-    // 【改善点】パッチを解除し、タイマーをネイティブな状態に戻す関数
     const uninstallPatches = () => {
         window.setTimeout = nativeTimers.setTimeout;
         window.clearTimeout = nativeTimers.clearTimeout;
         window.setInterval = nativeTimers.setInterval;
         window.clearInterval = nativeTimers.clearInterval;
-        console.log("[YouTube CPU Tamer] All patches uninstalled. Timers are native.");
+        console.log("[YouTube CPU Tamer] Patches uninstalled. Timers are native.");
     };
 
     // --- 5. 初期パッチ適用 ---
-    patchTimers();
+    installPatches();
 
-    // --- 6. YouTubeのSPA遷移への対応（改善版） ---
-    let isNavigating = false;
+    // --- 6. YouTubeのSPA遷移への対応（v4.80: DOM監視によるインテリジェント方式） ---
+    let navigationHandler = null;
     window.addEventListener("yt-navigate-finish", () => {
-      if (isNavigating) return;
-      isNavigating = true;
+      if (navigationHandler) {
+          navigationHandler.abort(); // 既に進行中のハンドラがあれば中止
+      }
 
-      console.log("[YouTube CPU Tamer] 'yt-navigate-finish' detected. Uninstalling patches to ensure stability...");
+      // 新しいナビゲーションに対応するハンドラを生成
+      navigationHandler = (function() {
+          let aborted = false;
+          let observer = null;
+          let timeoutId = null;
 
-      // ステップ1: まずパッチを完全に解除する
-      uninstallPatches();
+          const cleanup = () => {
+              if (observer) observer.disconnect();
+              if (timeoutId) nativeTimers.clearTimeout(timeoutId);
+              observer = null;
+              timeoutId = null;
+              navigationHandler = null;
+          };
 
-      // ステップ2: ネイティブのsetTimeoutを使い、安全な待機時間を設ける
-      nativeTimers.setTimeout(() => {
-          console.log("[YouTube CPU Tamer] Safe wait time elapsed. Re-installing patches...");
+          const handleRepatch = (reason) => {
+              if (aborted) return;
+              console.log(`[YouTube CPU Tamer] ${reason}. Re-installing patches...`);
+              installPatches();
+              timersAreThrottled = document.visibilityState === "visible";
+              console.log(`[YouTube CPU Tamer] Re-patching complete. Throttling is now ${timersAreThrottled ? 'ON' : 'OFF'}`);
+              cleanup();
+          };
 
-          // ステップ3: 再びパッチを適用する
-          patchTimers();
+          // --- メインロジック ---
+          console.log("[YouTube CPU Tamer] 'yt-navigate-finish' detected. Uninstalling patches...");
+          uninstallPatches();
 
-          // 状態をリセットし、次回のナビゲーションに備える
-          timersAreThrottled = document.visibilityState === "visible";
-          isNavigating = false;
-          console.log(`[YouTube CPU Tamer] Re-patching complete. Throttling is now ${timersAreThrottled ? 'ON' : 'OFF'}`);
-      }, REPATCH_DELAY_AFTER_NAVIGATE);
+          // プレイヤー要素を監視
+          observer = new MutationObserver(() => {
+              if (document.querySelector(PLAYER_READY_SELECTOR)) {
+                  handleRepatch("Player element detected");
+              }
+          });
+
+          if(document.body){
+            observer.observe(document.body, { childList: true, subtree: true });
+          }
+
+          // タイムアウトを設定（安全装置）
+          timeoutId = nativeTimers.setTimeout(() => {
+              handleRepatch("Repatch timeout reached");
+          }, REPATCH_TIMEOUT);
+
+          // 既にプレイヤーが存在する場合に即時実行
+          if (document.querySelector(PLAYER_READY_SELECTOR)) {
+              nativeTimers.setTimeout(() => handleRepatch("Player element already exists"), 0);
+          }
+
+          return {
+              abort: () => {
+                  if (aborted) return;
+                  console.log("[YouTube CPU Tamer] Aborting previous navigation handler.");
+                  aborted = true;
+                  cleanup();
+              }
+          };
+      })();
     });
   };
 
