@@ -1,44 +1,56 @@
 # 🎯 YouTube CPU Tamer – Hybrid Edition (Improved)
 
-## 🧩 概要
+## 🧩 Overview
 
-このユーザースクリプトは、YouTubeおよびYouTube Music再生ページでの**CPU負荷を削減**することを目的としています。  
-従来の `setTimeout` / `setInterval` の動作を **DOMの変化**と**アニメーションフレーム**に連動して動的に制御し、無駄な処理を削減します。
+This userscript dramatically **reduces CPU usage** on YouTube and YouTube Music. It dynamically switches between `requestAnimationFrame` and `MutationObserver` based on tab visibility to optimize the behavior of timer APIs like `setTimeout`. The script also intelligently handles YouTube's SPA (Single Page Application) transitions to ensure continued stability and avoid freezes.
 
-- ⚙️ ハイブリッドトリガー（可視状態で `requestAnimationFrame`、非可視時は `MutationObserver`）
-- 🧠 遅延補正付きのスマートタイマー制御
-- 🔄 `visibilitychange` に応じて自動切替
-- 💻 `iframe` を活用したセーフなコンテキスト生成
-
-## 🚀 インストール方法
-
-1. ブラウザに [Violentmonkey](https://violentmonkey.github.io/) または [Tampermonkey](https://www.tampermonkey.net/) を導入
-2. 以下のリンクからスクリプトをインストール  
-   👉 [このスクリプトをインストールする](https://raw.githubusercontent.com/koyasi777/youtube-cpu-tamer-hybrid/main/youtube-cpu-tamer-hybrid.user.js)
-
-## 📌 対応サイト
-
-- `https://www.youtube.com/`
-- `https://music.youtube.com/`
-- `https://www.youtube.com/embed/`
-- `https://www.youtube-nocookie.com/embed/`
-
-## 🔍 技術的なポイント
-
-- `window.setTimeout` / `setInterval` をラップして動的に制御
-- 背景タブでの不必要な処理を抑制
-- 実行タイミングを精密に調整しCPU消費を抑える
-
-## 🛠 開発者向けメモ
-
-- ソースコードは純粋なES2020
-- `iframe`経由でクリーンなAPIコンテキストを再生成
-- `.toString()` も元関数と一致するよう上書き済み（検出対策）
-
-## 📜 ライセンス
-
-MIT License – 自由にご利用・改変可能です（ご自身の責任のもとでご利用ください）
+* ⚙️ **Hybrid trigger strategy**: Automatically switches based on visibility state
+* 🔄 **SPA-aware repatching**: Uses `yt-navigate-finish` events and DOM observation for automatic recovery
+* 🧠 **Minimum delay threshold**: Prevents interference with critical player functions
+* 🧼 **Native timers from iframe**: Ensures a clean and safe execution context
 
 ---
 
-> 🎥 あなたのYouTube体験を、静かに・軽やかに。CPUも一息つけます。
+## 🚀 How to Install
+
+1. Install **[Violentmonkey](https://violentmonkey.github.io/)** or **[Tampermonkey](https://www.tampermonkey.net/)** in your browser
+2. Add the script using the link below:
+   👉 [Install this script](https://raw.githubusercontent.com/koyasi777/youtube-cpu-tamer-hybrid/main/youtube-cpu-tamer-hybrid.user.js)
+
+---
+
+## 📌 Supported Sites
+
+* `https://www.youtube.com/`
+* `https://music.youtube.com/`
+* `https://www.youtube.com/embed/`
+* `https://www.youtube-nocookie.com/embed/`
+
+---
+
+## 🔍 Technical Highlights
+
+* 🎛 Wraps `setTimeout`/`setInterval` with hybrid throttling logic
+* 👁 Uses `MutationObserver` in background tabs to reduce unnecessary CPU cycles
+* 🔧 Repatches after SPA navigation using DOM monitoring and timeout fallback
+* 🧪 Preserves `.toString()` on patched functions to prevent detection
+* 🧼 Utilizes native timers from sandboxed iframe to avoid contamination
+
+---
+
+## 👨‍💻 Developer Notes
+
+* Written in modern ES2020 JavaScript
+* No pollution of global namespace
+* Uses `@inject-into: page` for seamless integration with YouTube internals
+
+---
+
+## 📜 License
+
+MIT License
+You are free to use, modify, and redistribute this script at your own risk.
+
+---
+
+> 🎥 Enjoy a smoother YouTube experience with a quieter CPU.
