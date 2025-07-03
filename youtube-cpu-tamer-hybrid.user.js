@@ -10,7 +10,7 @@
 // @name:de           YouTube CPU-Last-Reduzierer – Hybrid-Edition
 // @name:pt-BR        Redutor de uso da CPU no YouTube – Edição Híbrida
 // @name:ru           Снижение нагрузки на CPU в YouTube – Гибридная версия
-// @version           4.80
+// @version           4.90
 // @description       Dramatically reduces CPU usage on YouTube by intelligently throttling timers, while protecting critical player functions to prevent freezing.
 // @description:ja    YouTubeのCPU負荷を劇的に削減します。動画プレイヤーの重要機能を保護し、無限ロードなどのフリーズ現象を防止する安定性重視の設計です。
 // @description:en    Dramatically reduces CPU usage on YouTube by intelligently throttling timers, while protecting critical player functions to prevent freezing.
@@ -83,7 +83,18 @@
       frame.id = FRAME_ID;
       frame.style.display = "none";
       frame.sandbox = "allow-same-origin allow-scripts";
-      frame.srcdoc = "<!doctype html><title>yt-cpu-tamer-timer-provider</title>";
+
+      // --- Trusted Types対応 ---
+      const frameHTML = "<!doctype html><title>yt-cpu-tamer-timer-provider</title>";
+      if (window.trustedTypes && window.trustedTypes.createPolicy) {
+          const policy = window.trustedTypes.createPolicy('youtube-cpu-tamer-policy', {
+              createHTML: (input) => input
+          });
+          frame.srcdoc = policy.createHTML(frameHTML);
+      } else {
+          frame.srcdoc = frameHTML;
+      }
+
       document.documentElement.appendChild(frame);
     }
     while (!frame.contentWindow || !frame.contentWindow.setTimeout) {
