@@ -491,7 +491,7 @@
 
         const tryRepatch=()=>{ if (document.querySelector(PLAYER_READY_SELECTOR)) handleRepatch("Player detected"); };
 
-        // ✅ 修正: ネイティブMOのバッチ版を使用（大量挿入でも穏やか）
+        // ネイティブMOのバッチ版を使用（大量挿入でも穏やか）
         observer = createBatchedObserver(tryRepatch);
         if (document.body) observer.observe(document.body,{childList:true,subtree:true});
 
