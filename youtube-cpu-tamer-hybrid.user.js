@@ -10,7 +10,7 @@
 // @name:de           YouTube CPU-Last-Reduzierer – Hybrid-Edition
 // @name:pt-BR        Redutor de uso da CPU no YouTube – Edição Híbrida
 // @name:ru           Снижение нагрузки на CPU в YouTube – Гибридная версия
-// @version           5.0.0
+// @version           5.5.0
 // @description       Reduces YouTube CPU usage by intelligently throttling timers and animation frames, while preserving critical player functions to help avoid freezes and infinite loading.
 // @description:ja    タイマーとアニメーションフレームを賢く間引いて YouTube の CPU 負荷を低減。プレイヤーの重要機能は保護し、フリーズや無限読み込みの発生を抑制します。
 // @description:en    Reduces YouTube CPU usage by intelligently throttling timers and animation frames, while preserving critical player functions to help avoid freezes and infinite loading.
@@ -49,35 +49,48 @@
   const THROTTLE_WHEN_HIDDEN = false;
   const PATCH_INTERVALS = false;
 
-  const ENABLE_THROTTLE_EVENTS = true;
-  const ENABLE_MUTATION_BATCH  = true;
+  let ENABLE_THROTTLE_EVENTS = true;       // ← /shorts では動的に無効化
   const ENABLE_LIGHT_CSS       = true;
-  const ENABLE_RAF_DECIMATOR   = true;   // ← Idle時だけ有効化するのでON
+  const HIDE_SPINNER           = true;     // ← 常時非表示（消え残り予防）
+  const ENABLE_RAF_DECIMATOR   = true;     // Idle かつ 非再生時のみ有効（Shortsは常に無効）
   const ADAPTIVE_MIN_DELAY_THRESHOLD = true;
 
-  // Idle Boost thresholds
-  const QUIET_MS = 6000;            // 入力無しでIdleへ
-  const IDLE_MIN_DELAY_FLOOR = 220; // Idle時の setTimeout 閾値の下限
-  const INTERACTIVE_MIN_DELAY_BASE = 150; // 通常時のベース（適応で上下）
+  // Idle thresholds
+  const QUIET_MS_BASE   = 6000;
+  const QUIET_MS_SHORTS = 12000;
+  const IDLE_MIN_DELAY_FLOOR = 220;
+  const INTERACTIVE_MIN_DELAY_BASE = 150;
 
   // rAF
   const RAF_VISIBLE_FPS_IDLE = 24;
   const RAF_HIDDEN_FPS_IDLE  = 5;
 
+  // Misc
   const PLAYER_READY_SELECTOR = "ytd-player,#movie_player,video.video-stream,ytmusic-player-bar";
   const REPATCH_TIMEOUT = 10000;
-  const CSS_TOGGLE_ATTR = "data-yt-cpu-tamer-cv-off"; // content-visibility一時解除用
+  const CSS_TOGGLE_ATTR = "data-yt-cpu-tamer-cv-off";
   const IDLE_ATTR = "data-yt-cpu-tamer-idle";
 
+  // ========= Debug =========
   const DEBUG = false;
   const dlog = (...a)=>{ if (DEBUG) console.debug("[YouTube CPU Tamer]", ...a); };
+  const isShorts = ()=> location.pathname.startsWith("/shorts");
 
-  // ========= Global knobs (dynamic) =========
-  let baseMinDelay = INTERACTIVE_MIN_DELAY_BASE; // Adaptive が更新
-  let MIN_DELAY_THRESHOLD = baseMinDelay;        // 実際に使われる値（Idleで上げる）
-  let MO_FLUSH_MS = 50;                          // Idleで80msに
-  let useDecimator = false;                      // Idleでtrue
-  const getMOFlushMs = () => MO_FLUSH_MS;
+  // ========= Globals =========
+  const NativeMO = window.MutationObserver;  // ← グローバル上書きは行わない
+  let baseMinDelay = INTERACTIVE_MIN_DELAY_BASE;
+  let MIN_DELAY_THRESHOLD = baseMinDelay;
+  let MO_FLUSH_MS = 50; // 内部用途の既定 flush
+  let useDecimator = false; // Idle＋非再生時のみ true
+  const getMOFlushMs = ()=> MO_FLUSH_MS;
+
+  // 内部専用：バッチ付き MO（外界には影響しない）
+  const createBatchedObserver = (cb)=>{
+    let queued=[], scheduled=false, lastObs=null;
+    const flush=()=>{ scheduled=false; const rec=queued; queued=[]; try{ cb(rec,lastObs); }catch(e){ console.error(e);} };
+    const proxy=(records,obs)=>{ lastObs=obs; queued.push(...records); if(!scheduled){ scheduled=true; setTimeout(flush, getMOFlushMs()); } };
+    return new NativeMO(proxy);
+  };
 
   // ========= Utilities =========
   const ORIG_RAF = window.requestAnimationFrame.bind(window);
@@ -86,8 +99,8 @@
   const nextAnimationFrame = ()=> new Promise(r=>requestAnimationFrame(r));
   const waitForDocReady = async()=>{ while(!document.documentElement||!document.head){ await nextAnimationFrame(); } };
 
-  // ========= Event throttler (stability edition) =========
-  if (ENABLE_THROTTLE_EVENTS) {
+  // ========= Event throttler =========
+  (function installEventThrottler(){
     try {
       const ORIG_ADD = EventTarget.prototype.addEventListener;
       const ORIG_REMOVE = EventTarget.prototype.removeEventListener;
@@ -135,6 +148,11 @@
       };
 
       EventTarget.prototype.addEventListener = function(type, listener, options){
+        // Shorts か、明示的に無効化された場合は完全素通し
+        if (isShorts() || !ENABLE_THROTTLE_EVENTS) {
+          return ORIG_ADD.call(this,type,listener,options);
+        }
+
         if (typeof listener!=="function") return ORIG_ADD.call(this,type,listener,options);
         if (isPlayerCritical(this)) return ORIG_ADD.call(this,type,listener,options);
         if (isGlobalTarget(this) && (type==="wheel"||type==="scroll"||type==="resize"))
@@ -152,44 +170,27 @@
         if (wrapped!==listener) wrapMap.set(listener,wrapped);
         return ORIG_ADD.call(this,type,wrapped,options);
       };
+
       EventTarget.prototype.removeEventListener = function(type, listener, options){
         const wrapped = wrapMap.get(listener)||listener;
         return ORIG_REMOVE.call(this,type,wrapped,options);
       };
+
       dlog("Event throttler installed.");
     } catch(e){ console.error("[YouTube CPU Tamer] Event throttler failed:", e); }
-  }
+  })();
 
-  // ========= MutationObserver batcher (dynamic flush) =========
-  if (ENABLE_MUTATION_BATCH) {
-    try {
-      const NativeMO = window.MutationObserver;
-      window.MutationObserver = class extends NativeMO {
-        constructor(cb){
-          let queue=[], scheduled=false, lastObserver=null;
-          const flush=()=>{ scheduled=false; const records=queue; queue=[]; try{cb(records,lastObserver);}catch(e){console.error(e);} };
-          const proxy=(records,obs)=>{
-            lastObserver=obs; queue.push(...records);
-            if(!scheduled){ scheduled=true; setTimeout(flush, getMOFlushMs()); }
-          };
-          super(proxy);
-        }
-      };
-      dlog("MO batcher installed.");
-    } catch(e){ console.error("[YouTube CPU Tamer] MO batcher failed:", e); }
-  }
-
-  // ========= CSS reductions (idle-aware) =========
+  // ========= CSS reductions =========
   if (ENABLE_LIGHT_CSS) {
     try {
       const styleId="yt-cpu-tamer-css";
       if(!document.getElementById(styleId)){
         const style=document.createElement("style"); style.id=styleId;
         style.textContent = `
-          /* 常時アニメ（スケルトン/継続ローディング）の抑制 */
+          /* スケルトン等の常時アニメ抑制 */
           .ytd-ghost-grid-renderer *, .ytd-continuation-item-renderer * { animation: none !important; }
 
-          /* 画面外の大領域は可視時のみ描画（一時解除は [${CSS_TOGGLE_ATTR}]） */
+          /* 画面外の大領域は可視時のみ描画（必要時は [${CSS_TOGGLE_ATTR}] で解除） */
           html:not([${CSS_TOGGLE_ATTR}]) #comments,
           html:not([${CSS_TOGGLE_ATTR}]) #related,
           html:not([${CSS_TOGGLE_ATTR}]) ytd-watch-next-secondary-results-renderer {
@@ -197,34 +198,48 @@
             contain-intrinsic-size: 800px 600px !important;
           }
 
-          /* スムーススクロールは無効（安定） */
+          /* スムーススクロール無効（安定側） */
           html { scroll-behavior: auto !important; }
 
-          /* === Idle Boost 中だけ追加の軽量化（操作復帰で即解除） === */
+          /* Idle Boost 中の追加軽量化 */
           html[${IDLE_ATTR}] ytd-thumbnail *,
           html[${IDLE_ATTR}] .ytp-storyboard,
           html[${IDLE_ATTR}] .ytd-reel-shelf-renderer * {
             animation: none !important;
             transition-property: none !important;
           }
+
+          /* --- Spinner kill switch (常時不可視) --- */
+          ${HIDE_SPINNER ? `
+          .ytp-spinner,
+          .ytp-spinner * {
+            display: none !important;
+            opacity: 0 !important;
+            visibility: hidden !important;
+            pointer-events: none !important;
+            animation: none !important;
+            transition: none !important;
+          }
+          .ytp-spinner-message { display: none !important; }
+          ` : ``}
         `;
         (document.head||document.documentElement).appendChild(style);
       }
     } catch(e){ console.error("[YouTube CPU Tamer] CSS reductions failed:", e); }
   }
 
-  // ========= rAF decimator (Idle時のみ動作) =========
+  // ========= rAF decimator（Idle＋非再生時のみ。Shortsでは無効） =========
   if (ENABLE_RAF_DECIMATOR) {
     try {
       const DECIM_ID_BASE = 1e9;
       let seq = 1;
-      const queued = new Map(); // id -> cb
+      const queued = new Map();
       let ticking=false, nextDue=performance.now();
 
       const budget = ()=> (document.visibilityState==="visible" ? 1000/RAF_VISIBLE_FPS_IDLE : 1000/RAF_HIDDEN_FPS_IDLE);
 
       const loop = ()=>{
-        if (!useDecimator) { ticking=false; return; } // 停止
+        if (!useDecimator) { ticking=false; return; }
         const now = performance.now();
         if (now >= nextDue) {
           nextDue = now + budget();
@@ -255,7 +270,7 @@
     } catch(e){ console.error("[YouTube CPU Tamer] rAF decimator failed:", e); }
   }
 
-  // ========= Adaptive timer threshold (updates baseMinDelay) =========
+  // ========= Adaptive timer threshold =========
   if (ADAPTIVE_MIN_DELAY_THRESHOLD) {
     try {
       let busy = 0;
@@ -267,18 +282,20 @@
         const slice = busy; busy=0;
         const ratio = Math.max(0, Math.min(1, slice/1000));
         baseMinDelay = Math.round(80 + (200-80) * ratio);
-        // Idleかどうかで実値を更新
+        // Idle 状態での実値を更新
         if (!document.documentElement.hasAttribute(IDLE_ATTR)) {
           MIN_DELAY_THRESHOLD = baseMinDelay;
         } else {
-          MIN_DELAY_THRESHOLD = Math.max(baseMinDelay, IDLE_MIN_DELAY_FLOOR);
+          const playing = isPlaying();
+          MIN_DELAY_THRESHOLD = playing ? Math.max(baseMinDelay, 120)
+                                        : Math.max(baseMinDelay, IDLE_MIN_DELAY_FLOOR);
         }
         dlog("Adaptive baseMinDelay=", baseMinDelay, " MIN_DELAY_THRESHOLD=", MIN_DELAY_THRESHOLD);
       }, 1000);
     } catch(e){ console.error("[YouTube CPU Tamer] Adaptive threshold failed:", e); }
   }
 
-  // ========= Layout kick (restore/minimize/BFCache) =========
+  // ========= Layout kick =========
   const kickLayout = ()=>{
     try{
       document.documentElement.setAttribute(CSS_TOGGLE_ATTR,"1");
@@ -307,11 +324,22 @@
   const enterIdle = ()=>{
     if (document.documentElement.hasAttribute(IDLE_ATTR)) return;
     document.documentElement.setAttribute(IDLE_ATTR,"1");
-    useDecimator = true;
-    MO_FLUSH_MS = 80;
-    MIN_DELAY_THRESHOLD = Math.max(baseMinDelay, IDLE_MIN_DELAY_FLOOR);
-    dlog("Idle Boost ON");
+
+    if (isShorts() || isPlaying()) {
+      // Shorts/再生中はデシメータ無効・MOは短め
+      useDecimator = false;
+      MO_FLUSH_MS = 50;
+      MIN_DELAY_THRESHOLD = Math.max(baseMinDelay, 120);
+      dlog("Idle Boost ON (playing/shorts-safe: no rAF decimation, MO=50ms, minDelay>=120)");
+    } else {
+      // 非再生 Idle は強く絞る
+      useDecimator = true;
+      MO_FLUSH_MS = 80;
+      MIN_DELAY_THRESHOLD = Math.max(baseMinDelay, IDLE_MIN_DELAY_FLOOR);
+      dlog("Idle Boost ON (no video: rAF decimation active)");
+    }
   };
+
   const exitIdle = ()=>{
     if (!document.documentElement.hasAttribute(IDLE_ATTR)) return;
     document.documentElement.removeAttribute(IDLE_ATTR);
@@ -323,7 +351,8 @@
 
   setInterval(()=>{
     const now = performance.now();
-    if (document.visibilityState==="visible" && isPlaying() && (now - lastActive) >= QUIET_MS) enterIdle();
+    const quietMs = isShorts() ? QUIET_MS_SHORTS : QUIET_MS_BASE;
+    if (document.visibilityState==="visible" && (now - lastActive) >= quietMs) enterIdle();
     else exitIdle();
   }, 1000);
 
@@ -340,7 +369,7 @@
       clearInterval: window.clearInterval.bind(window),
     };
 
-    // Clean timers via sandboxed iframe
+    // sandboxed iframe からクリーンなタイマを供給
     const FRAME_ID="yt-cpu-tamer-timer-frame";
     let frame=document.getElementById(FRAME_ID);
     if(frame && (!frame.contentWindow||!frame.contentWindow.setTimeout)){ frame.remove(); frame=null; }
@@ -367,12 +396,15 @@
     let dummy=document.getElementById(DUMMY_ID);
     if(!dummy){ dummy=document.createElement("div"); dummy.id=DUMMY_ID; dummy.style.display="none"; document.documentElement.appendChild(dummy); }
 
-    let timersAreThrottled = document.visibilityState==="visible";
+    // Shorts は「可視時スロットルなし」
+    const shouldThrottleVisibleTimers = ()=> document.visibilityState==="visible" && !isShorts();
+
+    let timersAreThrottled = shouldThrottleVisibleTimers();
     const makeHybridTrigger = ()=>{
       if (document.visibilityState==="visible" || THROTTLE_WHEN_HIDDEN) {
         return (cb)=>{ const p=new PromiseExt(); requestAnimationFrame(p.resolve); return p.then(cb); };
       } else {
-        return (cb)=>{ const p=new PromiseExt(); const mo=new MutationObserver(()=>{ mo.disconnect(); p.resolve(); });
+        return (cb)=>{ const p=new PromiseExt(); const mo=new NativeMO(()=>{ mo.disconnect(); p.resolve(); });
           mo.observe(dummy,{attributes:true}); dummy.setAttribute("data-yt-cpu-tamer-trigger", Math.random().toString(36)); return p.then(cb); };
       }
     };
@@ -381,10 +413,10 @@
     const VC_FLAG="__yt_cpu_tamer_visibility_listener__";
     if(!window[VC_FLAG]){
       document.addEventListener("visibilitychange", ()=>{
-        timersAreThrottled = document.visibilityState==="visible";
+        timersAreThrottled = shouldThrottleVisibleTimers();
         currentTrigger = makeHybridTrigger();
         if (document.visibilityState==="visible") kickLayout();
-        dlog("Visibility:", document.visibilityState, " timers=", timersAreThrottled);
+        dlog("Visibility:", document.visibilityState, " timers(throttled?)=", timersAreThrottled, " (shorts=", isShorts(),")");
       });
       window[VC_FLAG]=true;
     }
@@ -395,12 +427,16 @@
     const makeTimeoutPatcher = (cleanTimeout, pool)=>function patchedSetTimeout(cb, delay=0, ...args){
       const isFn = (typeof cb==="function");
       const runInMain = isFn ? ()=>cb.apply(window,args) : ()=>{ try{ (0,eval)(String(cb)); }catch(e){ console.error("[YT Tamer] eval error:",e);} };
+
+      if (isShorts()) return mainTimers.setTimeout(runInMain, delay); // Shortsは常に素通し
+
       if (!timersAreThrottled || delay < MIN_DELAY_THRESHOLD) return mainTimers.setTimeout(runInMain, delay);
       let id = cleanTimeout(()=>{ if(pool.has(id)) pool.delete(id); currentTrigger(runInMain); }, delay);
       pool.add(id); return id;
     };
     const makeClearTimeout = (pool)=>(id)=>{ if(pool.has(id)){ pool.delete(id); nativeTimers.clearTimeout(id);} else { mainTimers.clearTimeout(id);} };
     const makeIntervalPatcher = (cleanInterval)=>function patchedSetInterval(cb, delay=0, ...args){
+      if (isShorts()) return mainTimers.setInterval(()=>cb.apply(window,args), delay); // Shortsは素通し
       if (!PATCH_INTERVALS || typeof cb!=="function" || delay<MIN_DELAY_THRESHOLD || !timersAreThrottled)
         return mainTimers.setInterval(()=>cb.apply(window,args), delay);
       return cleanInterval(()=>{ currentTrigger(()=>cb.apply(window,args)); }, delay);
@@ -409,8 +445,14 @@
     const installPatches = ()=>{
       window.setTimeout = makeTimeoutPatcher(nativeTimers.setTimeout, activeTimeouts);
       window.clearTimeout = makeClearTimeout(activeTimeouts);
-      window.setInterval = PATCH_INTERVALS ? makeIntervalPatcher(nativeTimers.setInterval) : mainTimers.setInterval;
+
+      // PATCH_INTERVALS=false のときは常にネイティブ
+      window.setInterval = PATCH_INTERVALS
+        ? (isShorts() ? mainTimers.setInterval : makeIntervalPatcher(nativeTimers.setInterval))
+        : mainTimers.setInterval;
+
       window.clearInterval = PATCH_INTERVALS ? nativeTimers.clearInterval : mainTimers.clearInterval;
+
       mirrorToString(window.setTimeout, mainTimers.setTimeout);
       mirrorToString(window.clearTimeout, mainTimers.clearTimeout);
       mirrorToString(window.setInterval, mainTimers.setInterval);
@@ -427,6 +469,7 @@
 
     installPatches();
 
+    // SPA遷移：構築中はネイティブ、プレイヤー検出 or タイムアウトで再パッチ
     window.addEventListener("yt-navigate-start", ()=>{ try{ uninstallPatches(); }catch{} });
 
     let navigationHandler=null;
@@ -439,7 +482,7 @@
           if (aborted) return;
           dlog(reason, "-> re-install timer patches");
           installPatches();
-          timersAreThrottled = document.visibilityState==="visible";
+          timersAreThrottled = shouldThrottleVisibleTimers();
           kickLayout();
           cleanup();
         };
@@ -447,7 +490,9 @@
         uninstallPatches();
 
         const tryRepatch=()=>{ if (document.querySelector(PLAYER_READY_SELECTOR)) handleRepatch("Player detected"); };
-        observer = new MutationObserver(tryRepatch);
+
+        // ✅ 修正: ネイティブMOのバッチ版を使用（大量挿入でも穏やか）
+        observer = createBatchedObserver(tryRepatch);
         if (document.body) observer.observe(document.body,{childList:true,subtree:true});
 
         tid = nativeTimers.setTimeout(()=>handleRepatch("Repatch timeout"), REPATCH_TIMEOUT);
@@ -455,8 +500,20 @@
 
         return { abort: ()=>{ if (aborted) return; aborted=true; cleanup(); } };
       })();
+
+      // ナビ直後は Idle タイマをリセット
+      lastActive = performance.now();
+
+      // /shorts に入ったら、イベントスロットルも rAF デシメータも完全停止
+      if (isShorts()) {
+        ENABLE_THROTTLE_EVENTS = false;
+        dlog("Shorts Safe Mode enabled (no visible timer throttle, no event throttle, no rAF decimation).");
+      } else {
+        ENABLE_THROTTLE_EVENTS = true;
+      }
     });
 
+    // BFCache 復帰時
     window.addEventListener("pageshow",(e)=>{ if (e.persisted) { dlog("pageshow BFCache -> layout kick"); kickLayout(); } });
   };
 
